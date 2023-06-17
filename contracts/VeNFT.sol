@@ -5,7 +5,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {ERC721, ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
+import {IERC721, ERC721, ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
 import {ERC721Burnable} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721Burnable.sol";
 import {Counters} from "@openzeppelin/contracts/utils/Counters.sol";
 
@@ -50,7 +50,6 @@ contract VeNFT is
         int128 bias; // veToken value at this point
         int128 slope; // slope at this point
         uint256 ts; // timestamp of this point
-        uint256 blk; // block number of this point
     }
 
     struct UserData {
@@ -65,15 +64,13 @@ contract VeNFT is
 
     uint256 public constant WEEK = 1 weeks;
     uint256 public constant MAX_TIME = 4 * 365 days;
-    uint256 public constant MIN_TIME = 1 * WEEK;
     uint256 public constant MULTIPLIER = 10 ** 18;
     int128 public constant I_YEAR = int128(uint128(365 days));
-    int128 public constant I_MIN_TIME = int128(uint128(WEEK));
 
+    address public immutable baseToken;
     uint256 public totalTokenLocked;
     Counters.Counter private _tokenIds;
     /// Base Token related information
-    address public immutable baseToken;
 
     /// @dev Mappings to store global point information
     uint256 public epoch;
@@ -103,7 +100,6 @@ contract VeNFT is
     constructor(address _token) ERC721("vote-escrowed NFT", "VeNFT") {
         require(_token != address(0), "_token is zero address");
         baseToken = _token;
-        pointHistory[0].blk = block.number;
         pointHistory[0].ts = block.timestamp;
     }
 
@@ -247,36 +243,6 @@ contract VeNFT is
         emit Supply(prevSupply, totalTokenLocked);
     }
 
-    /// @notice Calculate total voting power at a given block number in past
-    /// @param blockNumber Block number to calculate total voting power at
-    /// @return Total voting power at block number
-    function totalSupplyAt(
-        uint256 blockNumber
-    ) external view returns (uint256) {
-        require(blockNumber <= block.number, "Only queryable for past");
-        uint256 _epoch = epoch;
-        uint256 targetEpoch = _findBlockEpoch(blockNumber, _epoch);
-
-        Point memory point0 = pointHistory[targetEpoch];
-        uint256 dt = 0;
-
-        if (targetEpoch < _epoch) {
-            Point memory point1 = pointHistory[targetEpoch + 1];
-            dt =
-                ((blockNumber - point0.blk) * (point1.ts - point0.ts)) /
-                (point1.blk - point0.blk);
-        } else {
-            if (point0.blk != block.number) {
-                dt =
-                    ((blockNumber - point0.blk) *
-                        (block.timestamp - point0.ts)) /
-                    (block.number - point0.blk);
-            }
-        }
-        // Now dt contains info on how far we are beyond point0
-        return supplyAt(point0, point0.ts + dt);
-    }
-
     /// @notice Get the most recently recorded rate of voting power decrease for `addr`
     /// @param tokenId Id of the desired token
     /// @return value of the slope
@@ -306,10 +272,11 @@ contract VeNFT is
         return lockedBalances[tokenId].end;
     }
 
-    function supportsInterface(
-        bytes4 interfaceId
-    ) public view override(ERC721, ERC721Enumerable) returns (bool) {
-        return super.supportsInterface(interfaceId);
+    /// @notice Get the current voting power a `tokenId` at current time
+    /// @param tokenId UniqueId for the token
+    /// @return Voting power associated with a token at current time
+    function balanceOfToken(uint256 tokenId) external view returns (uint256) {
+        return balanceOfToken(tokenId, block.timestamp);
     }
 
     /// @notice Get the voting power for a user at the specified timestamp
@@ -321,7 +288,7 @@ contract VeNFT is
         uint256 tokenId,
         uint256 ts
     ) public view returns (uint256) {
-        uint256 _epoch = _findUserTimestampEpoch(tokenId, ts);
+        uint256 _epoch = _findTokenTimestampEpoch(tokenId, ts);
         if (_epoch == 0) {
             return 0;
         } else {
@@ -336,68 +303,30 @@ contract VeNFT is
         }
     }
 
-    /// @notice Get the current voting power for a user
-    /// @param tokenId UniqueId for the token
+    /// @notice Gets the current voting power of a user
+    /// @param  addr Address of the user
     /// @return Voting power of user at current timestamp
-    function balanceOfToken(uint256 tokenId) public view returns (uint256) {
-        return balanceOfToken(tokenId, block.timestamp);
+    function balanceOf(
+        address addr
+    ) public view override(ERC721, IERC721) returns (uint256) {
+        return balanceOf(addr, block.timestamp);
     }
 
-    /// @notice Get the voting power of `addr` at block `blockNumber`
-    /// @param tokenId UniqueId for the token
-    /// @param blockNumber Block number to get voting power at
-    /// @return Voting power of user at block number
-    function balanceOfTokenAt(
-        uint256 tokenId,
-        uint256 blockNumber
-    ) public view returns (uint256) {
-        uint256 min = 0;
-        uint256 max = tokenPointEpoch[tokenId];
-
-        // Find the approximate timestamp for the block number
-        for (uint256 i = 0; i < 128; i++) {
-            if (min >= max) {
-                break;
-            }
-            uint256 mid = (min + max + 1) / 2;
-            if (tokenPointHistory[tokenId][mid].blk <= blockNumber) {
-                min = mid;
-            } else {
-                max = mid - 1;
-            }
-        }
-
-        // min is the userEpoch nearest to the block number
-        Point memory uPoint = tokenPointHistory[tokenId][min];
-        uint256 maxEpoch = epoch;
-
-        // blocktime using the global point history
-        uint256 _epoch = _findBlockEpoch(blockNumber, maxEpoch);
-        Point memory point0 = pointHistory[_epoch];
-        uint256 dBlock = 0;
-        uint256 dt = 0;
-
-        if (_epoch < maxEpoch) {
-            Point memory point1 = pointHistory[_epoch + 1];
-            dBlock = point1.blk - point0.blk;
-            dt = point1.ts - point0.ts;
+    /// @notice Gets the voting power of a user at a given time
+    /// @param addr Address of the user
+    /// @return Voting power of user at timestamp `ts`
+    function balanceOf(address addr, uint256 ts) public view returns (uint256) {
+        uint256 epc = _findUserTimestampEpoch(addr, ts);
+        if (epc == 0) {
+            return 0;
         } else {
-            dBlock = blockNumber - point0.blk;
-            dt = block.timestamp - point0.ts;
+            UserData memory lastPoint = userTokenHistory[addr][epc];
+            uint256 bal = 0;
+            for (uint256 i = 0; i < lastPoint.tokenIds.length; ++i) {
+                bal += balanceOfToken(lastPoint.tokenIds[i], ts);
+            }
+            return bal;
         }
-
-        uint256 blockTime = point0.ts;
-        if (dBlock != 0) {
-            blockTime += (dt * (blockNumber - point0.blk)) / dBlock;
-        }
-
-        uPoint.bias -=
-            uPoint.slope *
-            int128(int256(blockTime) - int256(uPoint.ts));
-        if (uPoint.bias < 0) {
-            uPoint.bias = 0;
-        }
-        return uint256(int256(uPoint.bias));
     }
 
     /// @notice Calculate total voting power at current timestamp
@@ -420,6 +349,12 @@ contract VeNFT is
     }
 
     // The following functions are overrides required by Solidity.
+    function supportsInterface(
+        bytes4 interfaceId
+    ) public view override(ERC721, ERC721Enumerable) returns (bool) {
+        return super.supportsInterface(interfaceId);
+    }
+
     function _beforeTokenTransfer(
         address from,
         address to,
@@ -481,32 +416,7 @@ contract VeNFT is
     /// NOTE:The following ERC20/minime-compatible methods are not real balanceOf and supply!!
     /// They measure the weights for the purpose of voting, so they don't represent real coins.
 
-    /// @notice Binary search to estimate timestamp for block number
-    /// @param blockNumber Block number to estimate timestamp for
-    /// @param maxEpoch Don't go beyond this epoch
-    /// @return Estimated timestamp for block number
-    function _findBlockEpoch(
-        uint256 blockNumber,
-        uint256 maxEpoch
-    ) internal view returns (uint256) {
-        uint256 min = 0;
-        uint256 max = maxEpoch;
-
-        for (uint256 i = 0; i < 128; i++) {
-            if (min >= max) {
-                break;
-            }
-            uint256 mid = (min + max + 1) / 2;
-            if (pointHistory[mid].blk <= blockNumber) {
-                min = mid;
-            } else {
-                max = mid - 1;
-            }
-        }
-        return min;
-    }
-
-    function _findUserTimestampEpoch(
+    function _findTokenTimestampEpoch(
         uint256 tokenId,
         uint256 ts
     ) internal view returns (uint256) {
@@ -519,6 +429,27 @@ contract VeNFT is
             }
             uint256 mid = (min + max + 1) / 2;
             if (tokenPointHistory[tokenId][mid].ts <= ts) {
+                min = mid;
+            } else {
+                max = mid - 1;
+            }
+        }
+        return min;
+    }
+
+    function _findUserTimestampEpoch(
+        address addr,
+        uint256 ts
+    ) internal view returns (uint256) {
+        uint256 min = 0;
+        uint256 max = userEpoch[addr];
+
+        for (uint256 i = 0; i < 128; i++) {
+            if (min >= max) {
+                break;
+            }
+            uint256 mid = (min + max + 1) / 2;
+            if (userTokenHistory[addr][mid].ts <= ts) {
                 min = mid;
             } else {
                 max = mid - 1;
@@ -628,8 +559,8 @@ contract VeNFT is
         LockedBalance memory oldDeposit,
         LockedBalance memory newDeposit
     ) private {
-        Point memory uOld = Point(0, 0, 0, 0);
-        Point memory uNew = Point(0, 0, 0, 0);
+        Point memory uOld = Point(0, 0, 0);
+        Point memory uNew = Point(0, 0, 0);
         int128 dSlopeOld = 0;
         int128 dSlopeNew = 0;
 
@@ -709,28 +640,19 @@ contract VeNFT is
         uint256 userEpc = tokenPointEpoch[tokenId] + 1;
         tokenPointEpoch[tokenId] = userEpc;
         uNew.ts = block.timestamp;
-        uNew.blk = block.number;
         tokenPointHistory[tokenId][userEpc] = uNew;
     }
 
     /// @notice add checkpoints to pointHistory for every week from last added checkpoint until now
-    /// @dev block number for each added checkpoint is estimated by their respective timestamp and the blockslope
-    ///         where the blockslope is estimated by the last added time/block point and the current time/block point
     /// @dev pointHistory include all weekly global checkpoints and some additional in-week global checkpoints
     /// @return lastPoint by calling this function
     function _updateGlobalPoint() private returns (Point memory lastPoint) {
         uint256 _epoch = epoch;
-        lastPoint = Point({
-            bias: 0,
-            slope: 0,
-            ts: block.timestamp,
-            blk: block.number //TODO: arbi-main-fork cannot test it
-        });
+        lastPoint = Point({bias: 0, slope: 0, ts: block.timestamp});
         Point memory initialLastPoint = Point({
             bias: 0,
             slope: 0,
-            ts: block.timestamp,
-            blk: block.number //TODO: arbi-main-fork cannot test it
+            ts: block.timestamp
         });
         if (_epoch > 0) {
             lastPoint = pointHistory[_epoch];
@@ -738,15 +660,6 @@ contract VeNFT is
         }
         uint256 lastCheckpoint = lastPoint.ts;
 
-        // initialLastPoint is used for extrapolation to calculate block number
-        // (approximately, for *At functions) and save them
-        // as we cannot figure that out exactly from inside the contract
-        uint256 blockSlope = 0; // dblock/dt
-        if (block.timestamp > lastPoint.ts) {
-            blockSlope =
-                (MULTIPLIER * (block.number - lastPoint.blk)) /
-                (block.timestamp - lastPoint.ts);
-        }
         // If last point is already recorded in this block, blockSlope is zero
         // But that's ok b/c we know the block in such case.
         // Go over weeks to fill history and calculate what the current point is
@@ -777,20 +690,14 @@ contract VeNFT is
 
                 lastCheckpoint = ti;
                 lastPoint.ts = ti;
-                lastPoint.blk =
-                    initialLastPoint.blk +
-                    (blockSlope * (ti - initialLastPoint.ts)) /
-                    MULTIPLIER;
                 _epoch += 1;
                 if (ti == block.timestamp) {
-                    lastPoint.blk = block.number;
                     pointHistory[_epoch] = lastPoint;
                     break;
                 }
                 pointHistory[_epoch] = lastPoint;
             }
         }
-
         epoch = _epoch;
         return lastPoint;
     }
