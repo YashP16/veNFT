@@ -1,28 +1,17 @@
+// SPDX-License-Identifier: Unlicensed
 pragma solidity 0.8.18;
-//@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@//
-//@@@@@@@@&....(@@@@@@@@@@@@@..../@@@@@@@@@//
-//@@@@@@........../@@@@@@@........../@@@@@@//
-//@@@@@............(@@@@@............(@@@@@//
-//@@@@@(............@@@@@(...........&@@@@@//
-//@@@@@@@...........&@@@@@@.........@@@@@@@//
-//@@@@@@@@@@@@@@%..../@@@@@@@@@@@@@@@@@@@@@//
-//@@@@@@@@@@@@@@@@@@@...@@@@@@@@@@@@@@@@@@@//
-//@@@@@@@@@@@@@@@@@@@@@......(&@@@@@@@@@@@@//
-//@@@@@@#.........@@@@@@#...........@@@@@@@//
-//@@@@@/...........%@@@@@............%@@@@@//
-//@@@@@............#@@@@@............%@@@@@//
-//@@@@@@..........#@@@@@@@/.........#@@@@@@//
-//@@@@@@@@@&/.(@@@@@@@@@@@@@@&/.(&@@@@@@@@@//
-//@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@//
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ERC721, ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
+import {ERC721Burnable} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721Burnable.sol";
+import {Counters} from "@openzeppelin/contracts/utils/Counters.sol";
 
 /// @title Voting Escrow Template
 /// @dev src: https://github.com/westonnelson/Vote-Escrow-Smart-Contract-Template/blob/main/contracts/veToken.sol
-/// @notice Make contract upgradeable
-/// @notice This is a Solidity implementation of the CURVE's voting escrow.
+/// @notice This is an extension and Solidity implementation of the CURVE's voting escrow.
 /// @notice Votes have a weight depending on time, so that users are
 ///         committed to the future of (whatever they are voting for)
 /// @dev Vote weight decays linearly over time. Lock time cannot be
@@ -40,7 +29,14 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 #       maxtime (4 years?)
 */
 
-contract veToken is Ownable, ReentrancyGuard {
+contract VeNFT is
+    ERC721,
+    ERC721Enumerable,
+    ERC721Burnable,
+    Ownable,
+    ReentrancyGuard
+{
+    using Counters for Counters.Counter;
     using SafeERC20 for IERC20;
 
     enum ActionType {
@@ -57,53 +53,56 @@ contract veToken is Ownable, ReentrancyGuard {
         uint256 blk; // block number of this point
     }
 
+    struct UserData {
+        uint256 ts;
+        uint256[] tokenIds;
+    }
+
     struct LockedBalance {
         uint128 amount; // amount of Token locked for a user.
         uint256 end; // the expiry time of the deposit.
     }
 
-    // veToken token related
-    string public version;
-    string public constant name = "Vote-escrow Token";
-    string public constant symbol = "veToken";
-    uint8 public constant decimals = 18;
-
-    uint256 public totalTokenLocked;
     uint256 public constant WEEK = 1 weeks;
     uint256 public constant MAX_TIME = 4 * 365 days;
     uint256 public constant MIN_TIME = 1 * WEEK;
-    uint256 public constant MULTIPLIER = 10**18;
+    uint256 public constant MULTIPLIER = 10 ** 18;
     int128 public constant I_YEAR = int128(uint128(365 days));
     int128 public constant I_MIN_TIME = int128(uint128(WEEK));
 
+    uint256 public totalTokenLocked;
+    Counters.Counter private _tokenIds;
     /// Base Token related information
-    address public Token;
+    address public immutable baseToken;
 
     /// @dev Mappings to store global point information
     uint256 public epoch;
     mapping(uint256 => Point) public pointHistory; // epoch -> unsigned point
     mapping(uint256 => int128) public slopeChanges; // time -> signed slope change
 
-    /// @dev Mappings to store user deposit information
-    mapping(address => LockedBalance) public lockedBalances; // user Deposits
-    mapping(address => mapping(uint256 => Point)) public userPointHistory; // user -> point[userEpoch]
-    mapping(address => uint256) public userPointEpoch;
+    /// @dev Mappings to store token deposit information
+    mapping(uint256 => LockedBalance) public lockedBalances; // user Deposits
+    mapping(uint256 => mapping(uint256 => Point)) public tokenPointHistory; // tokenId -> point[userEpoch]
+    mapping(uint256 => uint256) public tokenPointEpoch;
 
-    event UserCheckpoint(
+    /// @dev Mappings to store historical user token data
+    mapping(address => mapping(uint256 => UserData)) public userTokenHistory;
+    mapping(address => uint256) public userEpoch;
+
+    event TokenCheckpoint(
         ActionType indexed actionType,
-        address indexed provider,
+        uint256 tokenId,
         uint256 value,
         uint256 indexed locktime
     );
     event GlobalCheckpoint(address caller, uint256 epoch);
-    event Withdraw(address indexed provider, uint256 value, uint256 ts);
+    event Withdraw(uint256 tokenId, uint256 value, uint256 ts);
     event Supply(uint256 prevSupply, uint256 supply);
 
     /// @dev Constructor
-    constructor(address _token, string memory _version) {
+    constructor(address _token) ERC721("vote-escrowed NFT", "VeNFT") {
         require(_token != address(0), "_token is zero address");
-        Token = _token;
-        version = _version;
+        baseToken = _token;
         pointHistory[0].blk = block.number;
         pointHistory[0].ts = block.timestamp;
     }
@@ -117,13 +116,10 @@ contract veToken is Ownable, ReentrancyGuard {
     /// @notice Deposit and lock tokens for a user
     /// @dev Anyone (even a smart contract) can deposit tokens for someone else, but
     ///      cannot extend their locktime and deposit for a user that is not locked
-    /// @param addr Address of the user
+    /// @param tokenId Id of the desired token
     /// @param value Amount of tokens to deposit
-    function depositFor(address addr, uint128 value)
-        external 
-        nonReentrant
-    {
-        LockedBalance memory existingDeposit = lockedBalances[addr];
+    function depositFor(uint256 tokenId, uint128 value) external nonReentrant {
+        LockedBalance memory existingDeposit = lockedBalances[tokenId];
         require(value > 0, "Cannot deposit 0 tokens");
         require(existingDeposit.amount > 0, "No existing lock");
 
@@ -131,13 +127,7 @@ contract veToken is Ownable, ReentrancyGuard {
             existingDeposit.end > block.timestamp,
             "Lock expired. Withdraw"
         );
-        _depositFor(
-            addr,
-            value,
-            0,
-            existingDeposit,
-            ActionType.DEPOSIT_FOR
-        );
+        _depositFor(tokenId, value, 0, existingDeposit, ActionType.DEPOSIT_FOR);
     }
 
     /// @notice Deposit `value` for `msg.sender` and lock untill `unlockTime`
@@ -148,9 +138,10 @@ contract veToken is Ownable, ReentrancyGuard {
         uint128 value,
         uint256 unlockTime
     ) external nonReentrant {
-        address account = _msgSender();
+        address account = msg.sender;
         uint256 roundedUnlockTime = (unlockTime / WEEK) * WEEK;
-        LockedBalance memory existingDeposit = lockedBalances[account];
+        uint256 tokenId = _mintNextToken(account);
+        LockedBalance memory existingDeposit = lockedBalances[tokenId];
 
         require(value > 0, "Cannot lock 0 tokens");
         require(existingDeposit.amount == 0, "Withdraw old tokens first");
@@ -160,7 +151,7 @@ contract veToken is Ownable, ReentrancyGuard {
             "Voting lock can be 4 years max"
         );
         _depositFor(
-            account,
+            tokenId,
             value,
             roundedUnlockTime,
             existingDeposit,
@@ -168,12 +159,16 @@ contract veToken is Ownable, ReentrancyGuard {
         );
     }
 
-    /// @notice Deposit `value` additional tokens for `msg.sender` without
+    /// @notice Deposit `value` additional tokens for `tokenId` without
     ///         modifying the locktime
+    /// @param tokenId Id of the desired token
     /// @param value Amount of tokens to deposit
-    function increaseAmount(uint128 value) external nonReentrant {
-        address account = _msgSender();
-        LockedBalance memory existingDeposit = lockedBalances[account];
+    function increaseAmount(
+        uint256 tokenId,
+        uint128 value
+    ) external nonReentrant {
+        require(ownerOf(tokenId) == msg.sender, "Unauthorized request");
+        LockedBalance memory existingDeposit = lockedBalances[tokenId];
 
         require(value > 0, "Cannot deposit 0 tokens");
         require(existingDeposit.amount > 0, "No existing lock found");
@@ -183,7 +178,7 @@ contract veToken is Ownable, ReentrancyGuard {
             "Lock expired. Withdraw"
         );
         _depositFor(
-            account,
+            tokenId,
             value,
             0,
             existingDeposit,
@@ -191,11 +186,12 @@ contract veToken is Ownable, ReentrancyGuard {
         );
     }
 
-    /// @notice Extend the locktime of `msg.sender`'s tokens to `unlockTime`
+    /// @notice Extend the locktime of `tokenId` tokens to `unlockTime`
+    /// @param tokenId Id of the desired token
     /// @param unlockTime New locktime
-    function increaseUnlockTime(uint256 unlockTime) external {
-        address account = _msgSender();
-        LockedBalance memory existingDeposit = lockedBalances[account];
+    function increaseUnlockTime(uint256 tokenId, uint256 unlockTime) external {
+        require(ownerOf(tokenId) == msg.sender, "Unauthorized request");
+        LockedBalance memory existingDeposit = lockedBalances[tokenId];
         uint256 roundedUnlockTime = (unlockTime / WEEK) * WEEK; // Locktime is rounded down to weeks
 
         require(existingDeposit.amount > 0, "No existing lock found");
@@ -213,7 +209,7 @@ contract veToken is Ownable, ReentrancyGuard {
         );
 
         _depositFor(
-            account,
+            tokenId,
             0,
             roundedUnlockTime,
             existingDeposit,
@@ -223,38 +219,41 @@ contract veToken is Ownable, ReentrancyGuard {
 
     /// @notice Withdraw tokens for `msg.sender`
     /// @dev Only possible if the locktime has expired
-    function withdraw() external nonReentrant {
-        address account = _msgSender();
-        LockedBalance memory existingDeposit = lockedBalances[account];
+    /// @param tokenId Id of the desired token
+    function withdraw(uint256 tokenId) external nonReentrant {
+        require(ownerOf(tokenId) == msg.sender, "Unauthorized request");
+        LockedBalance memory existingDeposit = lockedBalances[tokenId];
         require(existingDeposit.amount > 0, "No existing lock found");
         require(block.timestamp >= existingDeposit.end, "Lock not expired.");
         uint128 value = existingDeposit.amount;
 
-        LockedBalance memory oldDeposit = lockedBalances[account];
-        lockedBalances[account] = LockedBalance(0, 0);
+        LockedBalance memory oldDeposit = lockedBalances[tokenId];
+        lockedBalances[tokenId] = LockedBalance(0, 0);
         uint256 prevSupply = totalTokenLocked;
         totalTokenLocked -= value;
 
         // oldDeposit can have either expired <= timestamp or 0 end
         // existingDeposit has 0 end
         // Both can have >= 0 amount
-        _checkpoint(account, oldDeposit, LockedBalance(0, 0));
+        _checkpoint(tokenId, oldDeposit, LockedBalance(0, 0));
 
-        IERC20(Token).safeTransfer(account, value);
-        emit Withdraw(account, value, block.timestamp);
+        // Transfer the underlying base token back to the user.
+        IERC20(baseToken).safeTransfer(msg.sender, value);
+
+        // Burn the nft token for the user
+        _burn(tokenId);
+
+        emit Withdraw(tokenId, value, block.timestamp);
         emit Supply(prevSupply, totalTokenLocked);
     }
 
     /// @notice Calculate total voting power at a given block number in past
     /// @param blockNumber Block number to calculate total voting power at
     /// @return Total voting power at block number
-    function totalSupplyAt(uint256 blockNumber)
-        external
-        view
-    
-        returns (uint256)
-    {
-        require(blockNumber <= block.number);
+    function totalSupplyAt(
+        uint256 blockNumber
+    ) external view returns (uint256) {
+        require(blockNumber <= block.number, "Only queryable for past");
         uint256 _epoch = epoch;
         uint256 targetEpoch = _findBlockEpoch(blockNumber, _epoch);
 
@@ -279,103 +278,54 @@ contract veToken is Ownable, ReentrancyGuard {
     }
 
     /// @notice Get the most recently recorded rate of voting power decrease for `addr`
-    /// @param addr The address to get the rate for
+    /// @param tokenId Id of the desired token
     /// @return value of the slope
-    function getLastUserSlope(address addr)
-        external
-        view
-    
-        returns (int128)
-    {
-        uint256 uEpoch = userPointEpoch[addr];
-        if (uEpoch == 0) {
+    function getLastTokenSlope(uint256 tokenId) external view returns (int128) {
+        uint256 tEpoch = tokenPointEpoch[tokenId];
+        if (tEpoch == 0) {
             return 0;
         }
-        return userPointHistory[addr][uEpoch].slope;
+        return tokenPointHistory[tokenId][tEpoch].slope;
     }
 
-    /// @notice Get the timestamp for checkpoint `idx` for `addr`
-    /// @param addr User wallet address
+    /// @notice Get the timestamp for checkpoint `idx` for `tokenId`
+    /// @param tokenId Id of the desired token
     /// @param idx User epoch number
     /// @return Epoch time of the checkpoint
-    function getUserPointHistoryTS(address addr, uint256 idx)
-        external
-        view
-    
-        returns (uint256)
-    {
-        return userPointHistory[addr][idx].ts;
+    function tokenPointHistoryTS(
+        uint256 tokenId,
+        uint256 idx
+    ) external view returns (uint256) {
+        return tokenPointHistory[tokenId][idx].ts;
     }
 
-    /// @notice Get timestamp when `addr`'s lock finishes
-    /// @param addr User wallet address
+    /// @notice Get timestamp when `tokenId`'s lock finishes
+    /// @param tokenId Id of the desired token
     /// @return Timestamp when lock finishes
-    function lockedEnd(address addr) external view returns (uint256) {
-        return lockedBalances[addr].end;
+    function lockedEnd(uint256 tokenId) external view returns (uint256) {
+        return lockedBalances[tokenId].end;
     }
 
-    /// @notice Function to estimate the user deposit
-    /// @param value Amount of Token to deposit
-    /// @param expectedUnlockTime The expected unlock time
-    /// @return initialVeTokenBalance
-    function estimateDeposit(
-        uint128 value,
-        uint256 expectedUnlockTime
-    )
-        public
-        view
-        returns (
-            int128 initialVeTokenBalance, // initial veToken balance
-            int128 slope, // slope of the user's graph
-            int128 bias, // bias of the user's graph
-            uint256 actualUnlockTime, // actual rounded unlock time
-            uint256 providedUnlockTime // expected unlock time
-        )
-    {
-        actualUnlockTime = (expectedUnlockTime / WEEK) * WEEK;
-
-        require(actualUnlockTime > block.timestamp, "Cannot lock in the past");
-        require(
-            actualUnlockTime <= block.timestamp + MAX_TIME,
-            "Voting lock can be 4 years max"
-        );
-
-        int128 amt = int128(value);
-        slope = amt / I_YEAR;
-
-        bias =
-            slope *
-            int128(int256(actualUnlockTime) - int256(block.timestamp));
-        
-        if (bias <= 0) {
-            bias = 0;
-        }
-
-        return (
-            initialVeTokenBalance,
-            slope,
-            bias,
-            actualUnlockTime,
-            expectedUnlockTime
-        );
+    function supportsInterface(
+        bytes4 interfaceId
+    ) public view override(ERC721, ERC721Enumerable) returns (bool) {
+        return super.supportsInterface(interfaceId);
     }
 
     /// @notice Get the voting power for a user at the specified timestamp
     /// @dev Adheres to ERC20 `balanceOf` interface for Aragon compatibility
-    /// @param addr User wallet address
+    /// @param tokenId uniqueId of the token
     /// @param ts Timestamp to get voting power at
     /// @return Voting power of user at timestamp
-    function balanceOf(address addr, uint256 ts)
-        public
-        view
-    
-        returns (uint256)
-    {
-        uint256 _epoch = _findUserTimestampEpoch(addr, ts);
+    function balanceOfToken(
+        uint256 tokenId,
+        uint256 ts
+    ) public view returns (uint256) {
+        uint256 _epoch = _findUserTimestampEpoch(tokenId, ts);
         if (_epoch == 0) {
             return 0;
         } else {
-            Point memory lastPoint = userPointHistory[addr][_epoch];
+            Point memory lastPoint = tokenPointHistory[tokenId][_epoch];
             lastPoint.bias -=
                 lastPoint.slope *
                 int128(int256(ts) - int256(lastPoint.ts));
@@ -387,24 +337,22 @@ contract veToken is Ownable, ReentrancyGuard {
     }
 
     /// @notice Get the current voting power for a user
-    /// @param addr User wallet address
+    /// @param tokenId UniqueId for the token
     /// @return Voting power of user at current timestamp
-    function balanceOf(address addr) public view returns (uint256) {
-        return balanceOf(addr, block.timestamp);
+    function balanceOfToken(uint256 tokenId) public view returns (uint256) {
+        return balanceOfToken(tokenId, block.timestamp);
     }
 
     /// @notice Get the voting power of `addr` at block `blockNumber`
-    /// @param addr User wallet address
+    /// @param tokenId UniqueId for the token
     /// @param blockNumber Block number to get voting power at
     /// @return Voting power of user at block number
-    function balanceOfAt(address addr, uint256 blockNumber)
-        public
-        view
-    
-        returns (uint256)
-    {
+    function balanceOfTokenAt(
+        uint256 tokenId,
+        uint256 blockNumber
+    ) public view returns (uint256) {
         uint256 min = 0;
-        uint256 max = userPointEpoch[addr];
+        uint256 max = tokenPointEpoch[tokenId];
 
         // Find the approximate timestamp for the block number
         for (uint256 i = 0; i < 128; i++) {
@@ -412,7 +360,7 @@ contract veToken is Ownable, ReentrancyGuard {
                 break;
             }
             uint256 mid = (min + max + 1) / 2;
-            if (userPointHistory[addr][mid].blk <= blockNumber) {
+            if (tokenPointHistory[tokenId][mid].blk <= blockNumber) {
                 min = mid;
             } else {
                 max = mid - 1;
@@ -420,7 +368,7 @@ contract veToken is Ownable, ReentrancyGuard {
         }
 
         // min is the userEpoch nearest to the block number
-        Point memory uPoint = userPointHistory[addr][min];
+        Point memory uPoint = tokenPointHistory[tokenId][min];
         uint256 maxEpoch = epoch;
 
         // blocktime using the global point history
@@ -454,7 +402,12 @@ contract veToken is Ownable, ReentrancyGuard {
 
     /// @notice Calculate total voting power at current timestamp
     /// @return Total voting power at current timestamp
-    function totalSupply() public view returns (uint256) {
+    function totalSupply()
+        public
+        view
+        override(ERC721Enumerable)
+        returns (uint256)
+    {
         return totalSupply(block.timestamp);
     }
 
@@ -466,15 +419,215 @@ contract veToken is Ownable, ReentrancyGuard {
         return supplyAt(lastPoint, ts);
     }
 
+    // The following functions are overrides required by Solidity.
+    function _beforeTokenTransfer(
+        address from,
+        address to,
+        uint256 tokenId,
+        uint256 batchSize
+    ) internal override(ERC721, ERC721Enumerable) {
+        if (from != address(0)) {
+            _checkpointUserPositions(from, tokenId, false);
+        }
+        if (to != address(0)) {
+            _checkpointUserPositions(to, tokenId, true);
+        }
+        super._beforeTokenTransfer(from, to, tokenId, batchSize);
+    }
+
+    function _mintNextToken(address to) internal returns (uint256 tokenId) {
+        _tokenIds.increment();
+        tokenId = _tokenIds.current();
+        _safeMint(to, tokenId);
+    }
+
+    /// @notice Calculate total voting power at some point in the past
+    /// @param point The point (bias/slope) to start search from
+    /// @param ts Timestamp to calculate total voting power at
+    /// @return Total voting power at timestamp
+    function supplyAt(
+        Point memory point,
+        uint256 ts
+    ) internal view returns (uint256) {
+        Point memory lastPoint = point;
+        uint256 ti = (lastPoint.ts / WEEK) * WEEK;
+
+        // Calculate the missing checkpoints
+        for (uint256 i = 0; i < 255; i++) {
+            ti += WEEK;
+            int128 dSlope = 0;
+            if (ti > ts) {
+                ti = ts;
+            } else {
+                dSlope = slopeChanges[ti];
+            }
+            lastPoint.bias -=
+                lastPoint.slope *
+                int128(int256(ti) - int256(lastPoint.ts));
+            if (ti == ts) {
+                break;
+            }
+            lastPoint.slope += dSlope;
+            lastPoint.ts = ti;
+        }
+
+        if (lastPoint.bias < 0) {
+            lastPoint.bias = 0;
+        }
+        return uint256(int256(lastPoint.bias));
+    }
+
+    // ----------------------VIEW functions----------------------
+    /// NOTE:The following ERC20/minime-compatible methods are not real balanceOf and supply!!
+    /// They measure the weights for the purpose of voting, so they don't represent real coins.
+
+    /// @notice Binary search to estimate timestamp for block number
+    /// @param blockNumber Block number to estimate timestamp for
+    /// @param maxEpoch Don't go beyond this epoch
+    /// @return Estimated timestamp for block number
+    function _findBlockEpoch(
+        uint256 blockNumber,
+        uint256 maxEpoch
+    ) internal view returns (uint256) {
+        uint256 min = 0;
+        uint256 max = maxEpoch;
+
+        for (uint256 i = 0; i < 128; i++) {
+            if (min >= max) {
+                break;
+            }
+            uint256 mid = (min + max + 1) / 2;
+            if (pointHistory[mid].blk <= blockNumber) {
+                min = mid;
+            } else {
+                max = mid - 1;
+            }
+        }
+        return min;
+    }
+
+    function _findUserTimestampEpoch(
+        uint256 tokenId,
+        uint256 ts
+    ) internal view returns (uint256) {
+        uint256 min = 0;
+        uint256 max = tokenPointEpoch[tokenId];
+
+        for (uint256 i = 0; i < 128; i++) {
+            if (min >= max) {
+                break;
+            }
+            uint256 mid = (min + max + 1) / 2;
+            if (tokenPointHistory[tokenId][mid].ts <= ts) {
+                min = mid;
+            } else {
+                max = mid - 1;
+            }
+        }
+        return min;
+    }
+
+    function _findGlobalTimestampEpoch(
+        uint256 ts
+    ) internal view returns (uint256) {
+        uint256 min = 0;
+        uint256 max = epoch;
+
+        for (uint256 i = 0; i < 128; i++) {
+            if (min >= max) {
+                break;
+            }
+            uint256 mid = (min + max + 1) / 2;
+            if (pointHistory[mid].ts <= ts) {
+                min = mid;
+            } else {
+                max = mid - 1;
+            }
+        }
+        return min;
+    }
+
+    /// @notice checkpoint user positions
+    /// @dev Function assits in calculating historical votes for a given user
+    /// @param addr Address of the user
+    /// @param tokenId TokenId added or removed from the user
+    /// @param isIncoming Flag determining id to be added or removed
+    function _checkpointUserPositions(
+        address addr,
+        uint256 tokenId,
+        bool isIncoming
+    ) private {
+        uint256 currentEpoch = userEpoch[addr];
+        uint256 nextEpoch = currentEpoch + 1;
+        uint256[] memory tokens = userTokenHistory[addr][currentEpoch].tokenIds;
+        uint256[] storage updatedTokenIds = userTokenHistory[addr][nextEpoch]
+            .tokenIds;
+        if (isIncoming) {
+            for (uint8 i = 0; i < tokens.length; ++i) {
+                updatedTokenIds.push(tokens[i]);
+            }
+            updatedTokenIds.push(tokenId);
+        } else {
+            for (uint8 i = 0; i < tokens.length; ++i) {
+                if (tokens[i] != tokenId) {
+                    updatedTokenIds.push(tokens[i]);
+                }
+            }
+        }
+        userTokenHistory[addr][nextEpoch].ts = block.timestamp;
+        userEpoch[addr] = nextEpoch;
+    }
+
+    /// @notice Deposit and lock tokens for a user
+    /// @param tokenId Deposit token Id
+    /// @param value Amount of tokens to deposit
+    /// @param unlockTime Time when the tokens will be unlocked
+    /// @param oldDeposit Previous locked balance of the user / timestamp
+    function _depositFor(
+        uint256 tokenId,
+        uint128 value,
+        uint256 unlockTime,
+        LockedBalance memory oldDeposit,
+        ActionType _type
+    ) private {
+        LockedBalance memory newDeposit = lockedBalances[tokenId];
+        uint256 prevSupply = totalTokenLocked;
+
+        totalTokenLocked += value;
+        // Adding to existing lock, or if a lock is expired - creating a new one
+        newDeposit.amount += value;
+        if (unlockTime != 0) {
+            newDeposit.end = unlockTime;
+        }
+        lockedBalances[tokenId] = newDeposit;
+
+        /// Possibilities:
+        // Both oldDeposit.end could be current or expired (>/<block.timestamp)
+        // value == 0 (extend lock) or value > 0 (add to lock or extend lock)
+        // newDeposit.end > block.timestamp (always)
+        _checkpoint(tokenId, oldDeposit, newDeposit);
+
+        if (value != 0) {
+            IERC20(baseToken).safeTransferFrom(
+                _msgSender(),
+                address(this),
+                value
+            );
+        }
+
+        emit TokenCheckpoint(_type, tokenId, value, newDeposit.end);
+        emit Supply(prevSupply, totalTokenLocked);
+    }
+
     /// @notice Record global and per-user data to checkpoint
-    /// @param addr User wallet address. No user checkpoint if 0x0
+    /// @param tokenId Unique deposit token Id.
     /// @param oldDeposit Previous locked balance / end lock time for the user
     /// @param newDeposit New locked balance / end lock time for the user
     function _checkpoint(
-        address addr,
+        uint256 tokenId,
         LockedBalance memory oldDeposit,
         LockedBalance memory newDeposit
-    ) internal {
+    ) private {
         Point memory uOld = Point(0, 0, 0, 0);
         Point memory uNew = Point(0, 0, 0, 0);
         int128 dSlopeOld = 0;
@@ -553,159 +706,11 @@ contract veToken is Ownable, ReentrancyGuard {
             // else: we recorded it already in old_dslopes̄
         }
         // Now handle user history
-        uint256 userEpc = userPointEpoch[addr] + 1;
-        userPointEpoch[addr] = userEpc;
+        uint256 userEpc = tokenPointEpoch[tokenId] + 1;
+        tokenPointEpoch[tokenId] = userEpc;
         uNew.ts = block.timestamp;
         uNew.blk = block.number;
-        userPointHistory[addr][userEpc] = uNew;
-    }
-
-    /// @notice Deposit and lock tokens for a user
-    /// @param addr Address of the user
-    /// @param value Amount of tokens to deposit
-    /// @param unlockTime Time when the tokens will be unlocked
-    /// @param oldDeposit Previous locked balance of the user / timestamp
-    function _depositFor(
-        address addr,
-        uint128 value,
-        uint256 unlockTime,
-        LockedBalance memory oldDeposit,
-        ActionType _type
-    ) internal {
-        LockedBalance memory newDeposit = lockedBalances[addr];
-        uint256 prevSupply = totalTokenLocked;
-
-        totalTokenLocked += value;
-        // Adding to existing lock, or if a lock is expired - creating a new one
-        newDeposit.amount += value;
-        if (unlockTime != 0) {
-            newDeposit.end = unlockTime;
-        }
-        lockedBalances[addr] = newDeposit;
-
-        /// Possibilities:
-        // Both oldDeposit.end could be current or expired (>/<block.timestamp)
-        // value == 0 (extend lock) or value > 0 (add to lock or extend lock)
-        // newDeposit.end > block.timestamp (always)
-        _checkpoint(addr, oldDeposit, newDeposit);
-
-        if (value != 0) {
-            IERC20(Token).safeTransferFrom(_msgSender(), address(this), value);
-        }
-
-        emit UserCheckpoint(_type, addr, value, newDeposit.end);
-        emit Supply(prevSupply, totalTokenLocked);
-    }
-
-    /// @notice Calculate total voting power at some point in the past
-    /// @param point The point (bias/slope) to start search from
-    /// @param ts Timestamp to calculate total voting power at
-    /// @return Total voting power at timestamp
-    function supplyAt(Point memory point, uint256 ts)
-        internal
-        view
-        returns (uint256)
-    {
-        Point memory lastPoint = point;
-        uint256 ti = (lastPoint.ts / WEEK) * WEEK;
-
-        // Calculate the missing checkpoints
-        for (uint256 i = 0; i < 255; i++) {
-            ti += WEEK;
-            int128 dSlope = 0;
-            if (ti > ts) {
-                ti = ts;
-            } else {
-                dSlope = slopeChanges[ti];
-            }
-            lastPoint.bias -=
-                lastPoint.slope *
-                int128(int256(ti) - int256(lastPoint.ts));
-            if (ti == ts) {
-                break;
-            }
-            lastPoint.slope += dSlope;
-            lastPoint.ts = ti;
-        }
-
-        if (lastPoint.bias < 0) {
-            lastPoint.bias = 0;
-        }
-        return uint256(int256(lastPoint.bias));
-    }
-
-    // ----------------------VIEW functions----------------------
-    /// NOTE:The following ERC20/minime-compatible methods are not real balanceOf and supply!!
-    /// They measure the weights for the purpose of voting, so they don't represent real coins.
-
-    /// @notice Binary search to estimate timestamp for block number
-    /// @param blockNumber Block number to estimate timestamp for
-    /// @param maxEpoch Don't go beyond this epoch
-    /// @return Estimated timestamp for block number
-    function _findBlockEpoch(uint256 blockNumber, uint256 maxEpoch)
-        internal
-        view
-        returns (uint256)
-    {
-        uint256 min = 0;
-        uint256 max = maxEpoch;
-
-        for (uint256 i = 0; i < 128; i++) {
-            if (min >= max) {
-                break;
-            }
-            uint256 mid = (min + max + 1) / 2;
-            if (pointHistory[mid].blk <= blockNumber) {
-                min = mid;
-            } else {
-                max = mid - 1;
-            }
-        }
-        return min;
-    }
-
-    function _findUserTimestampEpoch(address addr, uint256 ts)
-        internal
-        view
-        returns (uint256)
-    {
-        uint256 min = 0;
-        uint256 max = userPointEpoch[addr];
-
-        for (uint256 i = 0; i < 128; i++) {
-            if (min >= max) {
-                break;
-            }
-            uint256 mid = (min + max + 1) / 2;
-            if (userPointHistory[addr][mid].ts <= ts) {
-                min = mid;
-            } else {
-                max = mid - 1;
-            }
-        }
-        return min;
-    }
-
-    function _findGlobalTimestampEpoch(uint256 ts)
-        internal
-        view
-        returns (uint256)
-    {
-        uint256 min = 0;
-        uint256 max = epoch;
-
-        for (uint256 i = 0; i < 128; i++) {
-            if (min >= max) {
-                break;
-            }
-            uint256 mid = (min + max + 1) / 2;
-            if (pointHistory[mid].ts <= ts) {
-                min = mid;
-            } else {
-                max = mid - 1;
-            }
-        }
-        return min;
+        tokenPointHistory[tokenId][userEpc] = uNew;
     }
 
     /// @notice add checkpoints to pointHistory for every week from last added checkpoint until now
@@ -744,20 +749,18 @@ contract veToken is Ownable, ReentrancyGuard {
         }
         // If last point is already recorded in this block, blockSlope is zero
         // But that's ok b/c we know the block in such case.
-
         // Go over weeks to fill history and calculate what the current point is
         {
             uint256 ti = (lastCheckpoint / WEEK) * WEEK;
             for (uint256 i = 0; i < 255; i++) {
                 // Hopefully it won't happen that this won't get used in 4 years!
                 // If it does, users will be able to withdraw but vote weight will be broken
-
                 ti += WEEK;
                 int128 dslope = 0;
                 if (ti > block.timestamp) {
                     ti = block.timestamp;
                 } else {
-                    dslope = slopeChanges[ti]; //TODO: check if possible that dslope = zerovalue
+                    dslope = slopeChanges[ti];
                 }
                 // calculate the slope and bia of the new last point
                 lastPoint.bias -=
@@ -766,11 +769,9 @@ contract veToken is Ownable, ReentrancyGuard {
                 lastPoint.slope += dslope;
                 // check sanity
                 if (lastPoint.bias < 0) {
-                    // This can happen //TODO: why it can happen?
                     lastPoint.bias = 0;
                 }
                 if (lastPoint.slope < 0) {
-                    // This cannot happen, but just in case //TODO: why it cannot < 0?
                     lastPoint.slope = 0;
                 }
 
