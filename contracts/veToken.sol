@@ -21,7 +21,6 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /// @title Voting Escrow Template
 /// @dev src: https://github.com/westonnelson/Vote-Escrow-Smart-Contract-Template/blob/main/contracts/veToken.sol
-/// @notice Cooldown logic is added in the contract
 /// @notice Make contract upgradeable
 /// @notice This is a Solidity implementation of the CURVE's voting escrow.
 /// @notice Votes have a weight depending on time, so that users are
@@ -48,24 +47,17 @@ contract veToken is Ownable, ReentrancyGuard {
         DEPOSIT_FOR,
         CREATE_LOCK,
         INCREASE_AMOUNT,
-        INCREASE_LOCK_TIME,
-        INITIATE_COOLDOWN
+        INCREASE_LOCK_TIME
     }
 
     struct Point {
         int128 bias; // veToken value at this point
         int128 slope; // slope at this point
-        int128 residue; // residue calculated at this point
         uint256 ts; // timestamp of this point
         uint256 blk; // block number of this point
     }
-    /* We cannot really do block numbers per se b/c slope is per time, not per block
-     * and per block could be fairly bad b/c Ethereum changes blocktimes.
-     * What we can do is to extrapolate ***At functions */
 
     struct LockedBalance {
-        bool autoCooldown; // if true, the user's deposit will have a default cooldown.
-        bool cooldownInitiated; // Determines if the cooldown has been initiated.
         uint128 amount; // amount of Token locked for a user.
         uint256 end; // the expiry time of the deposit.
     }
@@ -99,7 +91,6 @@ contract veToken is Ownable, ReentrancyGuard {
 
     event UserCheckpoint(
         ActionType indexed actionType,
-        bool autoCooldown,
         address indexed provider,
         uint256 value,
         uint256 indexed locktime
@@ -136,21 +127,12 @@ contract veToken is Ownable, ReentrancyGuard {
         require(value > 0, "Cannot deposit 0 tokens");
         require(existingDeposit.amount > 0, "No existing lock");
 
-        if (!existingDeposit.autoCooldown) {
-            require(
-                !existingDeposit.cooldownInitiated,
-                "Cannot deposit during cooldown"
-            );
-        }
-        // else: auto-cooldown is on, so user can deposit anytime prior to expiry
         require(
             existingDeposit.end > block.timestamp,
             "Lock expired. Withdraw"
         );
         _depositFor(
             addr,
-            existingDeposit.autoCooldown,
-            existingDeposit.cooldownInitiated,
             value,
             0,
             existingDeposit,
@@ -161,15 +143,10 @@ contract veToken is Ownable, ReentrancyGuard {
     /// @notice Deposit `value` for `msg.sender` and lock untill `unlockTime`
     /// @param value Amount of tokens to deposit
     /// @param unlockTime Time when the tokens will be unlocked
-    /// @param autoCooldown Choose to opt in to auto-cooldown
-    /// @dev if autoCooldown is true, the user's veToken balance will
-    ///      decay to 0 after `unlockTime` else the user's veToken balance
-    ///      will remain = residual balance till user initiates cooldown
     /// @dev unlockTime is rownded down to whole weeks
     function createLock(
         uint128 value,
-        uint256 unlockTime,
-        bool autoCooldown
+        uint256 unlockTime
     ) external nonReentrant {
         address account = _msgSender();
         uint256 roundedUnlockTime = (unlockTime / WEEK) * WEEK;
@@ -184,8 +161,6 @@ contract veToken is Ownable, ReentrancyGuard {
         );
         _depositFor(
             account,
-            autoCooldown,
-            autoCooldown,
             value,
             roundedUnlockTime,
             existingDeposit,
@@ -203,22 +178,12 @@ contract veToken is Ownable, ReentrancyGuard {
         require(value > 0, "Cannot deposit 0 tokens");
         require(existingDeposit.amount > 0, "No existing lock found");
 
-        if (!existingDeposit.autoCooldown) {
-            require(
-                !existingDeposit.cooldownInitiated,
-                "Cannot deposit during cooldown"
-            );
-        }
-        // else: auto-cooldown is on, so user can deposit anytime prior to expiry
-
         require(
             existingDeposit.end > block.timestamp,
             "Lock expired. Withdraw"
         );
         _depositFor(
             account,
-            existingDeposit.autoCooldown,
-            existingDeposit.cooldownInitiated,
             value,
             0,
             existingDeposit,
@@ -234,13 +199,6 @@ contract veToken is Ownable, ReentrancyGuard {
         uint256 roundedUnlockTime = (unlockTime / WEEK) * WEEK; // Locktime is rounded down to weeks
 
         require(existingDeposit.amount > 0, "No existing lock found");
-        if (!existingDeposit.autoCooldown) {
-            require(
-                !existingDeposit.cooldownInitiated,
-                "Deposit is in cooldown"
-            );
-        }
-        // else: auto-cooldown is on, so user can increase unlocktime anytime prior to expiry
         require(
             existingDeposit.end > block.timestamp,
             "Lock expired. Withdraw"
@@ -256,40 +214,10 @@ contract veToken is Ownable, ReentrancyGuard {
 
         _depositFor(
             account,
-            existingDeposit.autoCooldown,
-            existingDeposit.cooldownInitiated,
             0,
             roundedUnlockTime,
             existingDeposit,
             ActionType.INCREASE_LOCK_TIME
-        );
-    }
-
-    /// @notice Initiate the cooldown period for `msg.sender`'s deposit
-    function initiateCooldown() external {
-        address account = _msgSender();
-        LockedBalance memory existingDeposit = lockedBalances[account];
-        require(existingDeposit.amount > 0, "No existing lock found");
-        require(
-            !existingDeposit.cooldownInitiated,
-            "Cooldown already initiated"
-        );
-        require(
-            block.timestamp >= existingDeposit.end - MIN_TIME,
-            "Can not initiate cool down"
-        );
-
-        uint256 roundedUnlockTime = ((block.timestamp + MIN_TIME) / WEEK) *
-            WEEK; // Locktime is rounded down to weeks
-
-        _depositFor(
-            account,
-            existingDeposit.autoCooldown,
-            true,
-            0,
-            roundedUnlockTime,
-            existingDeposit,
-            ActionType.INITIATE_COOLDOWN
         );
     }
 
@@ -299,19 +227,18 @@ contract veToken is Ownable, ReentrancyGuard {
         address account = _msgSender();
         LockedBalance memory existingDeposit = lockedBalances[account];
         require(existingDeposit.amount > 0, "No existing lock found");
-        require(existingDeposit.cooldownInitiated, "No cooldown initiated");
         require(block.timestamp >= existingDeposit.end, "Lock not expired.");
         uint128 value = existingDeposit.amount;
 
         LockedBalance memory oldDeposit = lockedBalances[account];
-        lockedBalances[account] = LockedBalance(false, false, 0, 0);
+        lockedBalances[account] = LockedBalance(0, 0);
         uint256 prevSupply = totalTokenLocked;
         totalTokenLocked -= value;
 
         // oldDeposit can have either expired <= timestamp or 0 end
         // existingDeposit has 0 end
         // Both can have >= 0 amount
-        _checkpoint(account, oldDeposit, LockedBalance(false, false, 0, 0));
+        _checkpoint(account, oldDeposit, LockedBalance(0, 0));
 
         IERC20(Token).safeTransfer(account, value);
         emit Withdraw(account, value, block.timestamp);
@@ -388,29 +315,21 @@ contract veToken is Ownable, ReentrancyGuard {
     }
 
     /// @notice Function to estimate the user deposit
-    /// @param autoCooldown Choose to opt in to auto-cooldown
     /// @param value Amount of Token to deposit
     /// @param expectedUnlockTime The expected unlock time
-    /// @dev if autoCooldown is true, the user's veToken balance will
-    ///      decay to 0 after `unlockTime` else the user's veToken balance
-    ///      will remain = residual balance till user initiates cooldown
-    /// @return Estimated deposit
+    /// @return initialVeTokenBalance
     function estimateDeposit(
-        bool autoCooldown,
         uint128 value,
         uint256 expectedUnlockTime
     )
         public
         view
         returns (
-            bool,
             int128 initialVeTokenBalance, // initial veToken balance
             int128 slope, // slope of the user's graph
             int128 bias, // bias of the user's graph
-            int128 residue, // residual balance
             uint256 actualUnlockTime, // actual rounded unlock time
-            uint256 providedUnlockTime, // expected unlock time
-            uint256 residuePeriodStart
+            uint256 providedUnlockTime // expected unlock time
         )
     {
         actualUnlockTime = (expectedUnlockTime / WEEK) * WEEK;
@@ -424,33 +343,20 @@ contract veToken is Ownable, ReentrancyGuard {
         int128 amt = int128(value);
         slope = amt / I_YEAR;
 
-        if (!autoCooldown) {
-            residue = (amt * I_MIN_TIME) / I_YEAR;
-            residuePeriodStart = actualUnlockTime - WEEK;
-            bias =
-                slope *
-                int128(
-                    int256(actualUnlockTime - WEEK) - int256(block.timestamp)
-                );
-        } else {
-            bias =
-                slope *
-                int128(int256(actualUnlockTime) - int256(block.timestamp));
-        }
+        bias =
+            slope *
+            int128(int256(actualUnlockTime) - int256(block.timestamp));
+        
         if (bias <= 0) {
             bias = 0;
         }
-        initialVeTokenBalance = bias + residue;
 
         return (
-            autoCooldown,
             initialVeTokenBalance,
             slope,
             bias,
-            residue,
             actualUnlockTime,
-            expectedUnlockTime,
-            residuePeriodStart
+            expectedUnlockTime
         );
     }
 
@@ -476,7 +382,6 @@ contract veToken is Ownable, ReentrancyGuard {
             if (lastPoint.bias < 0) {
                 lastPoint.bias = 0;
             }
-            lastPoint.bias += lastPoint.residue;
             return uint256(int256(lastPoint.bias));
         }
     }
@@ -544,7 +449,6 @@ contract veToken is Ownable, ReentrancyGuard {
         if (uPoint.bias < 0) {
             uPoint.bias = 0;
         }
-        uPoint.bias += uPoint.residue;
         return uint256(int256(uPoint.bias));
     }
 
@@ -571,8 +475,8 @@ contract veToken is Ownable, ReentrancyGuard {
         LockedBalance memory oldDeposit,
         LockedBalance memory newDeposit
     ) internal {
-        Point memory uOld = Point(0, 0, 0, 0, 0);
-        Point memory uNew = Point(0, 0, 0, 0, 0);
+        Point memory uOld = Point(0, 0, 0, 0);
+        Point memory uNew = Point(0, 0, 0, 0);
         int128 dSlopeOld = 0;
         int128 dSlopeNew = 0;
 
@@ -580,10 +484,6 @@ contract veToken is Ownable, ReentrancyGuard {
         // Skipped in case of createLock
         if (oldDeposit.amount > 0) {
             int128 amt = int128(oldDeposit.amount);
-            if (!oldDeposit.cooldownInitiated) {
-                uOld.residue = (amt * I_MIN_TIME) / I_YEAR;
-                oldDeposit.end -= WEEK; // move back one week since oldDeposit.end is not a slope-change point
-            }
             if (oldDeposit.end > block.timestamp) {
                 uOld.slope = amt / I_YEAR;
 
@@ -596,10 +496,6 @@ contract veToken is Ownable, ReentrancyGuard {
         // Skipped in case of withdraw
         if ((newDeposit.end > block.timestamp) && (newDeposit.amount > 0)) {
             int128 amt = int128(newDeposit.amount);
-            if (!newDeposit.cooldownInitiated) {
-                uNew.residue = (amt * I_MIN_TIME) / I_YEAR;
-                newDeposit.end -= WEEK; // move back one week since oldDeposit.end is not a slope-change point
-            }
             if (newDeposit.end > block.timestamp) {
                 uNew.slope = amt / I_YEAR;
                 uNew.bias =
@@ -625,7 +521,6 @@ contract veToken is Ownable, ReentrancyGuard {
         // update the last global checkpoint (now) with user action's consequences
         lastPoint.slope += (uNew.slope - uOld.slope); //TODO: why we can just add slopes up?
         lastPoint.bias += (uNew.bias - uOld.bias);
-        lastPoint.residue += (uNew.residue - uOld.residue);
         if (lastPoint.slope < 0) {
             // it will never happen if everything works correctly
             lastPoint.slope = 0;
@@ -672,8 +567,6 @@ contract veToken is Ownable, ReentrancyGuard {
     /// @param oldDeposit Previous locked balance of the user / timestamp
     function _depositFor(
         address addr,
-        bool autoCooldown,
-        bool enableCooldown,
         uint128 value,
         uint256 unlockTime,
         LockedBalance memory oldDeposit,
@@ -685,8 +578,6 @@ contract veToken is Ownable, ReentrancyGuard {
         totalTokenLocked += value;
         // Adding to existing lock, or if a lock is expired - creating a new one
         newDeposit.amount += value;
-        newDeposit.autoCooldown = autoCooldown;
-        newDeposit.cooldownInitiated = enableCooldown;
         if (unlockTime != 0) {
             newDeposit.end = unlockTime;
         }
@@ -702,7 +593,7 @@ contract veToken is Ownable, ReentrancyGuard {
             IERC20(Token).safeTransferFrom(_msgSender(), address(this), value);
         }
 
-        emit UserCheckpoint(_type, autoCooldown, addr, value, newDeposit.end);
+        emit UserCheckpoint(_type, addr, value, newDeposit.end);
         emit Supply(prevSupply, totalTokenLocked);
     }
 
@@ -740,7 +631,6 @@ contract veToken is Ownable, ReentrancyGuard {
         if (lastPoint.bias < 0) {
             lastPoint.bias = 0;
         }
-        lastPoint.bias += lastPoint.residue;
         return uint256(int256(lastPoint.bias));
     }
 
@@ -828,14 +718,12 @@ contract veToken is Ownable, ReentrancyGuard {
         lastPoint = Point({
             bias: 0,
             slope: 0,
-            residue: 0,
             ts: block.timestamp,
             blk: block.number //TODO: arbi-main-fork cannot test it
         });
         Point memory initialLastPoint = Point({
             bias: 0,
             slope: 0,
-            residue: 0,
             ts: block.timestamp,
             blk: block.number //TODO: arbi-main-fork cannot test it
         });
