@@ -4,7 +4,13 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "install-pip-packages": "pip3 install -r pip-requirements.txt",
+    "install-husky": "husky install",
+    "prepare": "npm-run-all install-pip-packages install-husky",
+    "slither-analyze": "slither .",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "lint-contract": "solhint 'contracts/**/*.sol' -f table",
+    "lint-contract:fix": "prettier --write 'contracts/**/*.sol'"
   },
   "keywords": [],
   "author": "",
@@ -12,7 +18,13 @@
   "devDependencies": {
     "@nomicfoundation/hardhat-foundry": "^1.0.1",
     "@nomicfoundation/hardhat-toolbox": "^3.0.0",
-    "hardhat": "^2.15.0"
+    "hardhat": "^2.15.0",
+    "husky": "^8.0.3",
+    "npm-run-all": "^4.1.5",
+    "prettier": "^2.8.8",
+    "solc": "^0.8.18",
+    "solhint": "^3.4.1",
+    "solhint-plugin-prettier": "^0.0.5"
   },
   "dependencies": {
     "@openzeppelin/contracts": "^4.9.2",
