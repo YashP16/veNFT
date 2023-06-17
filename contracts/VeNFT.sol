@@ -47,7 +47,7 @@ contract VeNFT is
     }
 
     struct Point {
-        int128 bias; // veToken value at this point
+        int256 bias; // veToken value at this point
         int128 slope; // slope at this point
         uint256 ts; // timestamp of this point
     }
@@ -299,7 +299,7 @@ contract VeNFT is
             if (lastPoint.bias < 0) {
                 lastPoint.bias = 0;
             }
-            return uint256(int256(lastPoint.bias));
+            return uint256(lastPoint.bias);
         }
     }
 
@@ -409,7 +409,7 @@ contract VeNFT is
         if (lastPoint.bias < 0) {
             lastPoint.bias = 0;
         }
-        return uint256(int256(lastPoint.bias));
+        return uint256(lastPoint.bias);
     }
 
     // ----------------------VIEW functions----------------------
@@ -540,7 +540,7 @@ contract VeNFT is
 
         if (value != 0) {
             IERC20(baseToken).safeTransferFrom(
-                _msgSender(),
+                msg.sender,
                 address(this),
                 value
             );
@@ -563,7 +563,6 @@ contract VeNFT is
         Point memory uNew = Point(0, 0, 0);
         int128 dSlopeOld = 0;
         int128 dSlopeNew = 0;
-
         // Calculate slopes and biases for oldDeposit
         // Skipped in case of createLock
         if (oldDeposit.amount > 0) {
@@ -584,7 +583,7 @@ contract VeNFT is
                 uNew.slope = amt / I_YEAR;
                 uNew.bias =
                     uNew.slope *
-                    int128(int256(newDeposit.end) - int256(block.timestamp));
+                    (int256(newDeposit.end) - int256(block.timestamp));
             }
         }
 
