@@ -28,12 +28,29 @@ BaseContract: https://github.com/Sperax/Vote-Escrow-Smart-Contract-Template
 
 # Commands:
 To set up the repository, please use the following commands:
-
 ```shell
-$ npm ci
-$ forge build --force
-$ forge test
-$ forge coverage
+    $npm ci
 ```
 
+## Foundry: 
+#### 1. Build and test the contracts: 
+```shell
+    $ forge build --force
+    $ forge test
+    $ forge coverage
+    $ npm run lint-contract
+    $ npm run slither-analyze
+```
 
+#### 2. Deploy the contract to forknet | mainnet
+(Ref: https://book.getfoundry.sh/tutorials/solidity-scripting)
+* Add and update `.env` file in the root as guided by `.env.example`
+* Load the env file using command `$ source .env`
+* Deploy contract to a forknet
+```shell
+    $ forge script scripts/Deployment.s.sol:Deployment --fork-url $ARBITRUM_MAINNET -vv 
+```
+* Deploy contract to a mainnet | local network
+```shell
+    $ forge script scripts/Deployment.s.sol:Deployment --rpc-url $ARBITRUM_MAINNET --broadcast --verify -vv
+```
