@@ -323,16 +323,17 @@ contract VeNFT is
     /// @notice Gets the current voting power of a user
     /// @param  addr Address of the user
     /// @return Voting power of user at current timestamp
-    function balanceOf(
-        address addr
-    ) public view override(ERC721, IERC721) returns (uint256) {
-        return balanceOf(addr, block.timestamp);
+    function balanceOfUser(address addr) public view returns (uint256) {
+        return balanceOfUser(addr, block.timestamp);
     }
 
     /// @notice Gets the voting power of a user at a given time
     /// @param addr Address of the user
     /// @return Voting power of user at timestamp `ts`
-    function balanceOf(address addr, uint256 ts) public view returns (uint256) {
+    function balanceOfUser(
+        address addr,
+        uint256 ts
+    ) public view returns (uint256) {
         uint256 epc = _findUserTimestampEpoch(addr, ts);
         if (epc == 0) {
             return 0;
@@ -411,6 +412,7 @@ contract VeNFT is
             if (ti > ts) {
                 ti = ts;
             } else {
+                // check for scheduled slope changes for the week
                 dSlope = slopeChanges[ti];
             }
             lastPoint.bias -=
