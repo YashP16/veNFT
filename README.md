@@ -38,6 +38,7 @@ To set up the repository, please use the following commands:
     $ forge build --force
     $ forge test
     $ forge coverage
+    $ npm run forge-coverage  #Requires `genhtml` | `ekhtml` package
     $ npm run lint-contract
     $ npm run slither-analyze
 ```
