@@ -88,12 +88,18 @@ contract VeNFT is
 
     event TokenCheckpoint(
         ActionType indexed actionType,
-        uint256 tokenId,
+        address indexed user,
+        uint256 indexed tokenId,
         uint256 value,
-        uint256 indexed locktime
+        uint256 locktime
     );
     event GlobalCheckpoint(address caller, uint256 epoch);
-    event Withdraw(uint256 tokenId, uint256 value, uint256 ts);
+    event Withdraw(
+        address indexed user,
+        uint256 indexed tokenId,
+        uint256 value,
+        uint256 ts
+    );
     event Supply(uint256 prevSupply, uint256 supply);
 
     /// @dev Constructor
@@ -110,20 +116,32 @@ contract VeNFT is
     }
 
     /// @notice Deposit and lock tokens for a user
+    /// @param addr Address of the desired user
     /// @dev Anyone (even a smart contract) can deposit tokens for someone else, but
     ///      cannot extend their locktime and deposit for a user that is not locked
     /// @param tokenId Id of the desired token
     /// @param value Amount of tokens to deposit
-    function depositFor(uint256 tokenId, uint128 value) external nonReentrant {
+    function depositFor(
+        address addr,
+        uint256 tokenId,
+        uint128 value
+    ) external nonReentrant {
+        require(ownerOf(tokenId) == addr, "Invalid request");
         LockedBalance memory existingDeposit = lockedBalances[tokenId];
         require(value > 0, "Cannot deposit 0 tokens");
-        require(existingDeposit.amount > 0, "No existing lock");
 
         require(
             existingDeposit.end > block.timestamp,
             "Lock expired. Withdraw"
         );
-        _depositFor(tokenId, value, 0, existingDeposit, ActionType.DEPOSIT_FOR);
+        _depositFor(
+            addr,
+            tokenId,
+            value,
+            0,
+            existingDeposit,
+            ActionType.DEPOSIT_FOR
+        );
     }
 
     /// @notice Deposit `value` for `msg.sender` and lock untill `unlockTime`
@@ -140,13 +158,13 @@ contract VeNFT is
         LockedBalance memory existingDeposit = lockedBalances[tokenId];
 
         require(value > 0, "Cannot lock 0 tokens");
-        require(existingDeposit.amount == 0, "Withdraw old tokens first");
         require(roundedUnlockTime > block.timestamp, "Cannot lock in the past");
         require(
             roundedUnlockTime <= block.timestamp + MAX_TIME,
             "Voting lock can be 4 years max"
         );
         _depositFor(
+            account,
             tokenId,
             value,
             roundedUnlockTime,
@@ -167,13 +185,13 @@ contract VeNFT is
         LockedBalance memory existingDeposit = lockedBalances[tokenId];
 
         require(value > 0, "Cannot deposit 0 tokens");
-        require(existingDeposit.amount > 0, "No existing lock found");
 
         require(
             existingDeposit.end > block.timestamp,
             "Lock expired. Withdraw"
         );
         _depositFor(
+            msg.sender,
             tokenId,
             value,
             0,
@@ -190,7 +208,6 @@ contract VeNFT is
         LockedBalance memory existingDeposit = lockedBalances[tokenId];
         uint256 roundedUnlockTime = (unlockTime / WEEK) * WEEK; // Locktime is rounded down to weeks
 
-        require(existingDeposit.amount > 0, "No existing lock found");
         require(
             existingDeposit.end > block.timestamp,
             "Lock expired. Withdraw"
@@ -205,6 +222,7 @@ contract VeNFT is
         );
 
         _depositFor(
+            msg.sender,
             tokenId,
             0,
             roundedUnlockTime,
@@ -219,8 +237,7 @@ contract VeNFT is
     function withdraw(uint256 tokenId) external nonReentrant {
         require(ownerOf(tokenId) == msg.sender, "Unauthorized request");
         LockedBalance memory existingDeposit = lockedBalances[tokenId];
-        require(existingDeposit.amount > 0, "No existing lock found");
-        require(block.timestamp >= existingDeposit.end, "Lock not expired.");
+        require(block.timestamp >= existingDeposit.end, "Lock not expired");
         uint128 value = existingDeposit.amount;
 
         LockedBalance memory oldDeposit = lockedBalances[tokenId];
@@ -239,7 +256,7 @@ contract VeNFT is
         // Burn the nft token for the user
         _burn(tokenId);
 
-        emit Withdraw(tokenId, value, block.timestamp);
+        emit Withdraw(msg.sender, tokenId, value, block.timestamp);
         emit Supply(prevSupply, totalTokenLocked);
     }
 
@@ -510,11 +527,13 @@ contract VeNFT is
     }
 
     /// @notice Deposit and lock tokens for a user
+    /// @param addr Address of the token owner
     /// @param tokenId Deposit token Id
     /// @param value Amount of tokens to deposit
     /// @param unlockTime Time when the tokens will be unlocked
     /// @param oldDeposit Previous locked balance of the user / timestamp
     function _depositFor(
+        address addr,
         uint256 tokenId,
         uint128 value,
         uint256 unlockTime,
@@ -546,7 +565,7 @@ contract VeNFT is
             );
         }
 
-        emit TokenCheckpoint(_type, tokenId, value, newDeposit.end);
+        emit TokenCheckpoint(_type, addr, tokenId, value, newDeposit.end);
         emit Supply(prevSupply, totalTokenLocked);
     }
 
@@ -572,7 +591,7 @@ contract VeNFT is
 
                 uOld.bias =
                     uOld.slope *
-                    int128(int256(oldDeposit.end) - int256(block.timestamp));
+                    (int256(oldDeposit.end) - int256(block.timestamp));
             }
         }
         // Calculate slopes and biases for newDeposit
@@ -586,7 +605,6 @@ contract VeNFT is
                     (int256(newDeposit.end) - int256(block.timestamp));
             }
         }
-
         // Read values of scheduled changes in the slope
         // oldDeposit.end can be in the past and in the future
         // newDeposit.end can ONLY be in the future, unless everything expired: than zeros
