@@ -10,7 +10,7 @@ import {ERC721Burnable} from "@openzeppelin/contracts/token/ERC721/extensions/ER
 import {Counters} from "@openzeppelin/contracts/utils/Counters.sol";
 
 /// @title Voting Escrow Template
-/// @dev src: https://github.com/westonnelson/Vote-Escrow-Smart-Contract-Template/blob/main/contracts/veToken.sol
+/// @dev src: https://github.com/Sperax/Vote-Escrow-Smart-Contract-Template/blob/main/contracts/veToken.sol
 /// @notice This is an extension and Solidity implementation of the CURVE's voting escrow.
 /// @notice Votes have a weight depending on time, so that users are
 ///         committed to the future of (whatever they are voting for)
@@ -373,6 +373,10 @@ contract VeNFT is
         return super.supportsInterface(interfaceId);
     }
 
+    /// @notice Pre-Transfer Hook
+    /// @dev Handles the accounting of positions for a user
+    ///      Required to account for user's historical balance.
+    /// @inheritdoc ERC721
     function _beforeTokenTransfer(
         address from,
         address to,
@@ -388,6 +392,8 @@ contract VeNFT is
         super._beforeTokenTransfer(from, to, tokenId, batchSize);
     }
 
+    /// @notice Mints next token Id
+    /// @param to address
     function _mintNextToken(address to) internal returns (uint256 tokenId) {
         _tokenIds.increment();
         tokenId = _tokenIds.current();
@@ -431,10 +437,9 @@ contract VeNFT is
         return uint256(lastPoint.bias);
     }
 
-    // ----------------------VIEW functions----------------------
-    /// NOTE:The following ERC20/minime-compatible methods are not real balanceOf and supply!!
-    /// They measure the weights for the purpose of voting, so they don't represent real coins.
-
+    /// @notice Get the nearest known token epoch for a given timestamp
+    /// @param tokenId tokenId
+    /// @param ts desired timestamp
     function _findTokenTimestampEpoch(
         uint256 tokenId,
         uint256 ts
@@ -456,6 +461,9 @@ contract VeNFT is
         return min;
     }
 
+    /// @notice Get the nearest known user epoch for a given timestamp
+    /// @param addr User's address
+    /// @param ts desired timestamp
     function _findUserTimestampEpoch(
         address addr,
         uint256 ts
@@ -477,6 +485,8 @@ contract VeNFT is
         return min;
     }
 
+    /// @notice Get the nearest known Global epoch for a given timestamp
+    /// @param ts desired timestamp
     function _findGlobalTimestampEpoch(
         uint256 ts
     ) internal view returns (uint256) {
@@ -513,17 +523,20 @@ contract VeNFT is
         uint256[] storage updatedTokenIds = userTokenHistory[addr][nextEpoch]
             .tokenIds;
         if (isIncoming) {
+            // Handle addition of new token for user
             for (uint8 i = 0; i < tokens.length; ++i) {
                 updatedTokenIds.push(tokens[i]);
             }
             updatedTokenIds.push(tokenId);
         } else {
+            // Handle removal of new token for user
             for (uint8 i = 0; i < tokens.length; ++i) {
                 if (tokens[i] != tokenId) {
                     updatedTokenIds.push(tokens[i]);
                 }
             }
         }
+        // Update user's data points
         userTokenHistory[addr][nextEpoch].ts = block.timestamp;
         userEpoch[addr] = nextEpoch;
     }
@@ -553,10 +566,6 @@ contract VeNFT is
         }
         lockedBalances[tokenId] = newDeposit;
 
-        /// Possibilities:
-        // Both oldDeposit.end could be current or expired (>/<block.timestamp)
-        // value == 0 (extend lock) or value > 0 (add to lock or extend lock)
-        // newDeposit.end > block.timestamp (always)
         _checkpoint(tokenId, oldDeposit, newDeposit);
 
         if (value != 0) {
@@ -622,14 +631,13 @@ contract VeNFT is
         // But in such case we have 0 slope(s)
 
         // update the last global checkpoint (now) with user action's consequences
-        lastPoint.slope += (uNew.slope - uOld.slope); //TODO: why we can just add slopes up?
+        lastPoint.slope += (uNew.slope - uOld.slope);
         lastPoint.bias += (uNew.bias - uOld.bias);
         if (lastPoint.slope < 0) {
             // it will never happen if everything works correctly
             lastPoint.slope = 0;
         }
         if (lastPoint.bias < 0) {
-            // TODO: why it can be < 0?
             lastPoint.bias = 0;
         }
         pointHistory[epoch] = lastPoint; // Record the changed point into the global history by replacement
@@ -694,7 +702,7 @@ contract VeNFT is
                 } else {
                     dslope = slopeChanges[ti];
                 }
-                // calculate the slope and bia of the new last point
+                // calculate the slope and bias of the new last point
                 lastPoint.bias -=
                     lastPoint.slope *
                     int128(int256(ti) - int256(lastCheckpoint));
