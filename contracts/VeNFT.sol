@@ -101,6 +101,11 @@ contract VeNFT is
         uint256 ts
     );
     event Supply(uint256 prevSupply, uint256 supply);
+    event UserPositionsMerged(
+        address indexed user,
+        uint256 primaryTokenId,
+        uint256 secondaryTokenId
+    );
 
     /// @dev Constructor
     constructor(address _token) ERC721("vote-escrowed NFT", "VeNFT") {
@@ -259,6 +264,51 @@ contract VeNFT is
         emit Withdraw(msg.sender, tokenId, value, block.timestamp);
         emit Supply(prevSupply, totalTokenLocked);
     }
+
+    /// @notice Merge multiple NFT positions for user
+    /// @param primaryId Primary position Id
+    /// @param secondaryId Secondary position Id
+    function mergePositions(uint256 primaryId, uint256 secondaryId) external {
+        // Check if it is an authorized operation.
+        require(ownerOf(primaryId) == msg.sender, "Unauthorized request");
+        require(ownerOf(secondaryId) == msg.sender, "Unauthorized request");
+
+        // Fetch existing position data
+        LockedBalance memory primaryLock = lockedBalances[primaryId];
+        LockedBalance memory secondaryLock = lockedBalances[secondaryId];
+
+        // Ensure that none of the positions are expired
+        require(block.timestamp < primaryLock.end, "Lock expired");
+        require(block.timestamp < secondaryLock.end, "Lock expired");
+
+        // Calculate the new unlock time
+        // @dev new UnlockTime = max(primaryLock.end, secondaryLock.end)
+        uint256 newUnlockTime = primaryLock.end >= secondaryLock.end
+            ? primaryLock.end
+            : secondaryLock.end;
+
+        // Create new deposit data object
+        LockedBalance memory updatedPrimaryLock = LockedBalance({
+            amount: (primaryLock.amount + secondaryLock.amount),
+            end: newUnlockTime
+        });
+        // Update the primary lock position
+        _checkpoint(primaryId, primaryLock, updatedPrimaryLock);
+
+        // Update and purge the secondary lock position
+        lockedBalances[secondaryId] = LockedBalance(0, 0);
+        _checkpoint(secondaryId, secondaryLock, LockedBalance(0, 0));
+        _burn(secondaryId);
+
+        emit UserPositionsMerged(msg.sender, primaryId, secondaryId);
+    }
+
+    /// @notice Splits an existing user position
+    /// @param tokenId Id of the desired token
+    /// @param splitAmount Amount to be locked in the new token
+    // function splitPositions(uint256 tokenId, uint256 splitAmount) external {
+    //     revert("To be implemented");
+    // }
 
     /// @notice Get the most recently recorded rate of voting power decrease for `addr`
     /// @param tokenId Id of the desired token
