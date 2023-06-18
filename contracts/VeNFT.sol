@@ -131,7 +131,7 @@ contract VeNFT is
         uint256 tokenId,
         uint128 value
     ) external nonReentrant {
-        require(ownerOf(tokenId) == addr, "Invalid request");
+        require(_ownerOf(tokenId) == addr, "Invalid request");
         LockedBalance memory existingDeposit = lockedBalances[tokenId];
         require(value > 0, "Cannot deposit 0 tokens");
 
@@ -186,7 +186,7 @@ contract VeNFT is
         uint256 tokenId,
         uint128 value
     ) external nonReentrant {
-        require(ownerOf(tokenId) == msg.sender, "Unauthorized request");
+        require(_ownerOf(tokenId) == msg.sender, "Unauthorized request");
         LockedBalance memory existingDeposit = lockedBalances[tokenId];
 
         require(value > 0, "Cannot deposit 0 tokens");
@@ -209,7 +209,7 @@ contract VeNFT is
     /// @param tokenId Id of the desired token
     /// @param unlockTime New locktime
     function increaseUnlockTime(uint256 tokenId, uint256 unlockTime) external {
-        require(ownerOf(tokenId) == msg.sender, "Unauthorized request");
+        require(_ownerOf(tokenId) == msg.sender, "Unauthorized request");
         LockedBalance memory existingDeposit = lockedBalances[tokenId];
         uint256 roundedUnlockTime = (unlockTime / WEEK) * WEEK; // Locktime is rounded down to weeks
 
@@ -240,7 +240,7 @@ contract VeNFT is
     /// @dev Only possible if the locktime has expired
     /// @param tokenId Id of the desired token
     function withdraw(uint256 tokenId) external nonReentrant {
-        require(ownerOf(tokenId) == msg.sender, "Unauthorized request");
+        require(_ownerOf(tokenId) == msg.sender, "Unauthorized request");
         LockedBalance memory existingDeposit = lockedBalances[tokenId];
         require(block.timestamp >= existingDeposit.end, "Lock not expired");
         uint128 value = existingDeposit.amount;
@@ -270,8 +270,8 @@ contract VeNFT is
     /// @param secondaryId Secondary position Id
     function mergePositions(uint256 primaryId, uint256 secondaryId) external {
         // Check if it is an authorized operation.
-        require(ownerOf(primaryId) == msg.sender, "Unauthorized request");
-        require(ownerOf(secondaryId) == msg.sender, "Unauthorized request");
+        require(_ownerOf(primaryId) == msg.sender, "Unauthorized request");
+        require(_ownerOf(secondaryId) == msg.sender, "Unauthorized request");
 
         // Fetch existing position data
         LockedBalance memory primaryLock = lockedBalances[primaryId];
